@@ -23,6 +23,8 @@ $PSDefaultParameterValues["*:Confirm"] = $false
 if ($MaxDownloadJobs -lt 1) { $MaxDownloadJobs = 1 }
 $script:WingetInstalledCache = @{}
 $script:UseOfflineInstall = $false
+$script:UseDownloadDir = $false
+$script:WingetDownloadDir = Join-Path $env:ProgramData "WinGet\\Downloads"
 
 function Write-Step {
     param([string]$Message)
@@ -107,6 +109,15 @@ function Test-WingetOfflineSupported {
     }
 }
 
+function Test-WingetInstallDownloadDirSupported {
+    try {
+        $help = & winget install --help 2>$null
+        return ($help -match "--download-directory")
+    } catch {
+        return $false
+    }
+}
+
 function Test-WslNoLaunchSupported {
     try {
         $help = & wsl --help 2>$null
@@ -165,6 +176,9 @@ function Install-IfMissing {
 
     if ($script:UseOfflineInstall) {
         $offlineArgs = $baseArgs + @("--offline")
+        if ($script:UseDownloadDir) {
+            $offlineArgs += @("--download-directory", $script:WingetDownloadDir)
+        }
         & winget @offlineArgs
         if ($LASTEXITCODE -eq 0) { return }
         Write-Host "  [WARN] Offline install failed; retrying online..." -ForegroundColor Yellow
@@ -360,56 +374,60 @@ function Start-WingetDownloadJobs {
     $queue = New-Object System.Collections.Queue
     foreach ($pkg in $Packages) { [void]$queue.Enqueue($pkg) }
 
-    $jobs = @()
+    $running = @()
     $ok = 0
     $fail = 0
+    $logDir = Join-Path $DownloadDir "_logs"
+    if (-not (Test-Path $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
 
-    while ($queue.Count -gt 0 -or $jobs.Count -gt 0) {
-        while ($queue.Count -gt 0 -and $jobs.Count -lt $MaxParallel) {
+    while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+        while ($queue.Count -gt 0 -and $running.Count -lt $MaxParallel) {
             $pkg = $queue.Dequeue()
             $id = $pkg.WingetId
             $name = $pkg.Name
             Write-Host "  Downloading: $name ($id)" -ForegroundColor DarkGray
-            $jobs += Start-Job -ScriptBlock {
-                param($WingetId, $DownloadDir)
-                $args = @(
-                    "download",
-                    "--id", $WingetId,
-                    "-e",
-                    "--source", "winget",
-                    "--download-directory", $DownloadDir,
-                    "--accept-source-agreements",
-                    "--accept-package-agreements",
-                    "--silent",
-                    "--disable-interactivity"
-                )
-                & winget @args | Out-Null
-                $exit = $LASTEXITCODE
-                if ($exit -ne 0) {
-                    Write-Output "FAILED:${WingetId}:$exit"
-                } else {
-                    Write-Output "OK:${WingetId}"
-                }
-            } -ArgumentList $id, $DownloadDir
+            $safeId = ($id -replace "[^A-Za-z0-9._-]", "_")
+            $logPath = Join-Path $logDir "$safeId.log"
+            $args = @(
+                "download",
+                "--id", $id,
+                "-e",
+                "--source", "winget",
+                "--download-directory", $DownloadDir,
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--silent",
+                "--disable-interactivity"
+            )
+            $proc = Start-Process -FilePath "winget" -ArgumentList $args -NoNewWindow -PassThru -RedirectStandardOutput $logPath -RedirectStandardError $logPath
+            $running += [pscustomobject]@{ Proc = $proc; Id = $id; Log = $logPath }
         }
 
-        $done = Wait-Job -Job $jobs -Any
-        $result = Receive-Job -Job $done -ErrorAction SilentlyContinue
-        foreach ($line in $result) {
-            if ($line -like "FAILED:*") {
-                $parts = $line.Split(":")
-                $id = $parts[1]
-                $exit = $parts[2]
-                $fail++
-                Write-Host "  [WARN] Download failed for $id (exit $exit)" -ForegroundColor Yellow
-            } elseif ($line -like "OK:*") {
-                $id = $line.Split(":")[1]
-                $ok++
-                Write-Host "  [OK] Downloaded $id" -ForegroundColor DarkGray
+        if ($running.Count -eq 0) { break }
+        try {
+            Wait-Process -Id ($running.Proc.Id) -Any -ErrorAction SilentlyContinue | Out-Null
+        } catch {
+            Start-Sleep -Milliseconds 300
+        }
+
+        $still = @()
+        foreach ($r in $running) {
+            if ($r.Proc.HasExited) {
+                $exit = $r.Proc.ExitCode
+                if ($exit -ne 0) {
+                    $fail++
+                    Write-Host "  [WARN] Download failed for $($r.Id) (exit $exit). Log: $($r.Log)" -ForegroundColor Yellow
+                } else {
+                    $ok++
+                    Write-Host "  [OK] Downloaded $($r.Id)" -ForegroundColor DarkGray
+                }
+            } else {
+                $still += $r
             }
         }
-        Remove-Job -Job $done -Force
-        $jobs = $jobs | Where-Object { $_.Id -ne $done.Id }
+        $running = $still
     }
 
     Write-Host "  Prefetch complete: $ok ok, $fail failed" -ForegroundColor DarkGray
@@ -472,29 +490,35 @@ if ($DryRun) {
 } elseif (-not (Test-WingetDownloadSupported)) {
     Write-Host "  [SKIP] winget download not supported; skipping prefetch" -ForegroundColor DarkGray
 } else {
-    $downloadDir = Join-Path $env:ProgramData "WinGet\Downloads"
-    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    $prefetchPkgs = @()
-    $allPkgs = @()
-    $allPkgs += $apps
-    $allPkgs += $dotnetPkgs
-    $allPkgs += $vcRedistPkgs
-    $allPkgs += $winSdkPkgs
-    foreach ($pkg in $allPkgs) {
-        if (Test-WingetInstalled -WingetId $pkg.WingetId) {
-            Write-Host "  Skip prefetch: $($pkg.Name) (already installed)" -ForegroundColor DarkGray
-        } else {
-            $prefetchPkgs += $pkg
-        }
-    }
-    if ($prefetchPkgs.Count -gt 0) {
-        Start-WingetDownloadJobs -Packages $prefetchPkgs -DownloadDir $downloadDir -MaxParallel $MaxDownloadJobs
-        if (Test-WingetOfflineSupported) {
-            $script:UseOfflineInstall = $true
-            Write-Host "  Offline install enabled (prefetch cache)" -ForegroundColor DarkGray
-        }
+    $offlineSupported = Test-WingetOfflineSupported
+    $downloadDirSupported = Test-WingetInstallDownloadDirSupported
+    if (-not $offlineSupported) {
+        Write-Host "  [SKIP] Offline install not supported; skipping prefetch to avoid redownload" -ForegroundColor DarkGray
+    } elseif (-not $downloadDirSupported) {
+        Write-Host "  [SKIP] Install does not support --download-directory; skipping prefetch" -ForegroundColor DarkGray
     } else {
-        Write-Host "  [SKIP] All packages already installed; no prefetch needed" -ForegroundColor DarkGray
+        New-Item -ItemType Directory -Path $script:WingetDownloadDir -Force | Out-Null
+        $prefetchPkgs = @()
+        $allPkgs = @()
+        $allPkgs += $apps
+        $allPkgs += $dotnetPkgs
+        $allPkgs += $vcRedistPkgs
+        $allPkgs += $winSdkPkgs
+        foreach ($pkg in $allPkgs) {
+            if (Test-WingetInstalled -WingetId $pkg.WingetId) {
+                Write-Host "  Skip prefetch: $($pkg.Name) (already installed)" -ForegroundColor DarkGray
+            } else {
+                $prefetchPkgs += $pkg
+            }
+        }
+        if ($prefetchPkgs.Count -gt 0) {
+            Start-WingetDownloadJobs -Packages $prefetchPkgs -DownloadDir $script:WingetDownloadDir -MaxParallel $MaxDownloadJobs
+            $script:UseOfflineInstall = $true
+            $script:UseDownloadDir = $true
+            Write-Host "  Offline install enabled (prefetch cache)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "  [SKIP] All packages already installed; no prefetch needed" -ForegroundColor DarkGray
+        }
     }
 }
 
