@@ -18,8 +18,17 @@ try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     } catch { }
 
-    Write-Host "Downloading: $SourceUrl" -ForegroundColor Cyan
-    $script = Invoke-RestMethod -Uri $SourceUrl -UseBasicParsing
+    $cacheBust = [DateTime]::UtcNow.Ticks
+    if ($SourceUrl -match "\\?") {
+        $downloadUrl = "$SourceUrl&ts=$cacheBust"
+    } else {
+        $downloadUrl = "$SourceUrl?ts=$cacheBust"
+    }
+    Write-Host "Downloading: $downloadUrl" -ForegroundColor Cyan
+    $script = Invoke-RestMethod -Uri $downloadUrl -UseBasicParsing -Headers @{
+        "Cache-Control" = "no-cache"
+        "Pragma" = "no-cache"
+    }
 } catch {
     Write-Host "Download failed: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
