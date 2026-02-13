@@ -118,6 +118,16 @@ function Test-WingetInstallDownloadDirSupported {
     }
 }
 
+function Test-WingetAvailable {
+    $cmd = Get-Command winget -ErrorAction SilentlyContinue
+    return ($null -ne $cmd)
+}
+
+function Test-WingetModuleAvailable {
+    $mod = Get-Module -ListAvailable -Name Microsoft.WinGet.Client -ErrorAction SilentlyContinue
+    return ($null -ne $mod)
+}
+
 function Test-WslNoLaunchSupported {
     try {
         $help = & wsl --help 2>$null
@@ -447,15 +457,21 @@ function Start-WingetDownloadJobs {
 Write-Step "Bootstrapping WinGet"
 
 if (-not $DryRun) {
-    $progressPreference = 'silentlyContinue'
-    Write-Host "  Trusting PSGallery to avoid prompts ..."
-    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-    Write-Host "  Installing WinGet PowerShell module from PSGallery ..."
-    Install-PackageProvider -Name NuGet -Force | Out-Null
-    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
-    Write-Host "  Using Repair-WinGetPackageManager to bootstrap WinGet ..."
-    Repair-WinGetPackageManager -AllUsers
-    Write-Host "  [OK] WinGet ready" -ForegroundColor Green
+    if (Test-WingetAvailable) {
+        Write-Host "  WinGet already available; skipping bootstrap" -ForegroundColor DarkGray
+    } else {
+        $progressPreference = 'silentlyContinue'
+        Write-Host "  Trusting PSGallery to avoid prompts ..."
+        Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+        Write-Host "  Installing WinGet PowerShell module from PSGallery ..."
+        Install-PackageProvider -Name NuGet -Force | Out-Null
+        if (-not (Test-WingetModuleAvailable)) {
+            Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery | Out-Null
+        }
+        Write-Host "  Using Repair-WinGetPackageManager to bootstrap WinGet ..."
+        Repair-WinGetPackageManager -AllUsers
+        Write-Host "  [OK] WinGet ready" -ForegroundColor Green
+    }
 } else {
     Write-Host "  [DRY RUN] Would bootstrap WinGet via PSGallery module" -ForegroundColor Yellow
 }
