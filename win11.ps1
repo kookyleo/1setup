@@ -363,9 +363,9 @@ function Start-WingetDownloadJobs {
                 & winget @args | Out-Null
                 $exit = $LASTEXITCODE
                 if ($exit -ne 0) {
-                    Write-Output "FAILED:$WingetId:$exit"
+                    Write-Output "FAILED:${WingetId}:$exit"
                 } else {
-                    Write-Output "OK:$WingetId"
+                    Write-Output "OK:${WingetId}"
                 }
             } -ArgumentList $id, $DownloadDir
         }
