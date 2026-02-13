@@ -321,6 +321,14 @@ function Set-RandomSolidColorBackground {
     Set-RegValue -Path $desktopKey -Name "TileWallpaper"  -Value "0" -Type String
 
     try {
+        Remove-ItemProperty -Path $desktopKey -Name "TranscodedImageCache" -ErrorAction SilentlyContinue
+        Get-ItemProperty -Path $desktopKey -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty PSObject |
+            Where-Object { $_.Name -like "TranscodedImageCache*" } |
+            ForEach-Object { Remove-ItemProperty -Path $desktopKey -Name $_.Name -ErrorAction SilentlyContinue }
+    } catch { }
+
+    try {
         Start-Process -FilePath "RUNDLL32.EXE" -ArgumentList "USER32.DLL,UpdatePerUserSystemParameters" -NoNewWindow | Out-Null
     } catch { }
 
