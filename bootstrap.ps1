@@ -31,12 +31,12 @@ try {
     }
 } catch {
     Write-Host "Download failed: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+    return
 }
 
 if (-not $script) {
     Write-Host "Downloaded script is empty." -ForegroundColor Red
-    exit 1
+    return
 }
 
 $sb = [ScriptBlock]::Create($script)
