@@ -551,9 +551,16 @@ if ($DryRun) {
 # ============================================================
 Write-Step "Installing core applications"
 
-# Remove Windows Widgets
+# Remove Windows Widgets (Web Experience Pack)
 Write-Host "  Removing Windows Widgets ..."
-Uninstall-WingetPackage -Name "Windows Web Experience Pack (Widgets)" -WingetId "Microsoft.WindowsWebExperiencePack" -QueryName "Windows Web Experience Pack"
+if ($DryRun) {
+    Write-Host "  [DRY RUN] Would remove Windows Web Experience Pack" -ForegroundColor Yellow
+} else {
+    Remove-AppxPackages -Patterns @(
+        "MicrosoftWindows.Client.WebExperience",
+        "Microsoft.WindowsWebExperiencePack"
+    )
+}
 
 foreach ($app in $apps) {
     Install-IfMissing -Name $app.Name -WingetId $app.WingetId -ChocoId $app.ChocoId
