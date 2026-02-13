@@ -13,7 +13,8 @@
 param(
     [switch]$DryRun,        # Preview only, no actual installation
     [switch]$SkipPrefetch,  # Skip parallel prefetch of installers
-    [int]$MaxDownloadJobs = 3
+    [int]$MaxDownloadJobs = 3,
+    [switch]$RestartExplorer
 )
 
 $ErrorActionPreference = "Continue"
@@ -336,6 +337,14 @@ function Set-RandomSolidColorBackground {
             Select-Object -ExpandProperty PSObject |
             Where-Object { $_.Name -like "TranscodedImageCache*" } |
             ForEach-Object { Remove-ItemProperty -Path $desktopKey -Name $_.Name -ErrorAction SilentlyContinue }
+    } catch { }
+
+    try {
+        $themeDir = Join-Path $env:APPDATA "Microsoft\\Windows\\Themes"
+        $transcoded = Join-Path $themeDir "TranscodedWallpaper"
+        $cachedDir = Join-Path $themeDir "CachedFiles"
+        if (Test-Path $transcoded) { Remove-Item -Path $transcoded -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $cachedDir) { Remove-Item -Path $cachedDir -Recurse -Force -ErrorAction SilentlyContinue }
     } catch { }
 
     try {
@@ -819,8 +828,7 @@ Set-RegValue -Path $themeKey -Name "EnableTransparency"   -Value 1
 
 # Wallpaper style: Fit (WallpaperStyle=10, TileWallpaper=0)
 $desktopKey = "HKCU:\Control Panel\Desktop"
-Set-RegValue -Path $desktopKey -Name "WallpaperStyle" -Value "10" -Type String
-Set-RegValue -Path $desktopKey -Name "TileWallpaper"  -Value "0"  -Type String
+# (solid color will override wallpaper settings below)
 
 # Window colorization
 $dwmKey = "HKCU:\Software\Microsoft\Windows\DWM"
@@ -1135,13 +1143,15 @@ foreach ($svc in $criticalServices) {
 # ============================================================
 Write-Step "Applying UI changes"
 
-if (-not $DryRun) {
+if (-not $DryRun -and $RestartExplorer) {
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Process explorer
     Write-Host "  Explorer restarted to apply settings" -ForegroundColor Green
-} else {
+} elseif ($DryRun) {
     Write-Host "  [DRY RUN] Would restart Explorer to apply UI changes" -ForegroundColor Yellow
+} else {
+    Write-Host "  [SKIP] Explorer restart disabled (use -RestartExplorer to enable)" -ForegroundColor DarkGray
 }
 
 # ============================================================
