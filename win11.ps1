@@ -116,6 +116,23 @@ function Test-WslNoLaunchSupported {
     }
 }
 
+function Test-WindowsOptionalFeatureEnabled {
+    param([string]$FeatureName)
+    $f = Get-WindowsOptionalFeature -Online -FeatureName $FeatureName -ErrorAction SilentlyContinue
+    return ($f -and $f.State -eq "Enabled")
+}
+
+function Test-WslDistroInstalled {
+    param([string]$DistroName)
+    if (-not $DistroName) { return $false }
+    $list = & wsl -l -q 2>$null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    foreach ($line in $list) {
+        if ($line.Trim() -eq $DistroName) { return $true }
+    }
+    return $false
+}
+
 function Install-IfMissing {
     param(
         [string]$Name,
@@ -124,6 +141,10 @@ function Install-IfMissing {
     )
     if ($DryRun) {
         Write-Host "  [DRY RUN] Would install: $Name ($WingetId)" -ForegroundColor Yellow
+        return
+    }
+    if (-not $WingetId) {
+        Write-Host "  [WARN] Missing WingetId for $Name; skip install" -ForegroundColor Yellow
         return
     }
     if ($WingetId -and (Test-WingetInstalled -WingetId $WingetId)) {
@@ -196,6 +217,8 @@ function Uninstall-WingetPackage {
         Write-Host "  [WARN] $Name uninstall failed (exit $LASTEXITCODE). Continuing..." -ForegroundColor Yellow
     } else {
         Write-Host "  [OK] Uninstalled: $Name" -ForegroundColor Green
+        if ($WingetId) { $script:WingetInstalledCache["id:$WingetId"] = $false }
+        if ($QueryName) { $script:WingetInstalledCache["q:$QueryName"] = $false }
     }
 }
 
@@ -458,7 +481,9 @@ if ($DryRun) {
     $allPkgs += $vcRedistPkgs
     $allPkgs += $winSdkPkgs
     foreach ($pkg in $allPkgs) {
-        if (-not (Test-WingetInstalled -WingetId $pkg.WingetId)) {
+        if (Test-WingetInstalled -WingetId $pkg.WingetId) {
+            Write-Host "  Skip prefetch: $($pkg.Name) (already installed)" -ForegroundColor DarkGray
+        } else {
             $prefetchPkgs += $pkg
         }
     }
@@ -480,12 +505,7 @@ Write-Step "Installing core applications"
 
 # Remove Windows Widgets
 Write-Host "  Removing Windows Widgets ..."
-if (-not $DryRun) {
-    winget uninstall "Windows Web Experience Pack" -e --silent --disable-interactivity --accept-source-agreements --accept-package-agreements 2>$null
-    Write-Host "  [OK] Widgets removed" -ForegroundColor Green
-} else {
-    Write-Host "  [DRY RUN] Would uninstall Windows Web Experience Pack (Widgets)" -ForegroundColor Yellow
-}
+Uninstall-WingetPackage -Name "Windows Web Experience Pack (Widgets)" -WingetId "Microsoft.WindowsWebExperiencePack" -QueryName "Windows Web Experience Pack"
 
 foreach ($app in $apps) {
     Install-IfMissing -Name $app.Name -WingetId $app.WingetId -ChocoId $app.ChocoId
@@ -561,17 +581,33 @@ function Disable-AllPageFiles {
 # ============================================================
 Write-Step "Configuring WSL"
 
-if (-not $DryRun) {
-    wsl --install --no-distribution 2>$null
-    $wslArgs = @("--install", "-d", "Ubuntu")
-    if (Test-WslNoLaunchSupported) {
-        $wslArgs += "--no-launch"
-    }
-    & wsl @wslArgs 2>$null
-    wsl --set-default Ubuntu
-    wsl --set-default-version 2
+if ($DryRun) {
+    Write-Host "  [DRY RUN] Would enable WSL2 and install Ubuntu (if missing)" -ForegroundColor Yellow
 } else {
-    Write-Host "  [DRY RUN] Would enable WSL2 and install Ubuntu" -ForegroundColor Yellow
+    $needWslFeature = -not (Test-WindowsOptionalFeatureEnabled -FeatureName "Microsoft-Windows-Subsystem-Linux")
+    $needVmFeature = -not (Test-WindowsOptionalFeatureEnabled -FeatureName "VirtualMachinePlatform")
+
+    if ($needWslFeature -or $needVmFeature) {
+        wsl --install --no-distribution 2>$null
+    } else {
+        Write-Host "  WSL features already enabled" -ForegroundColor DarkGray
+    }
+
+    $hasUbuntu = Test-WslDistroInstalled -DistroName "Ubuntu"
+    if (-not $hasUbuntu) {
+        $wslArgs = @("--install", "-d", "Ubuntu")
+        if (Test-WslNoLaunchSupported) {
+            $wslArgs += "--no-launch"
+        }
+        & wsl @wslArgs 2>$null
+    } else {
+        Write-Host "  Ubuntu already installed" -ForegroundColor DarkGray
+    }
+
+    if (Test-WslDistroInstalled -DistroName "Ubuntu") {
+        wsl --set-default Ubuntu
+        wsl --set-default-version 2
+    }
 }
 
 # ============================================================
