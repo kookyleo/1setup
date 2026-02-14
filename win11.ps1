@@ -640,6 +640,32 @@ function Disable-AllPageFiles {
     Write-Host "  [SET] All paging files disabled (reboot required)" -ForegroundColor Green
 }
 
+function Ensure-IPv6KeepaliveTask {
+    param(
+        [string]$TaskName = "IPv6-AlibabaDNS-Keepalive",
+        [string]$Address = "2400:3200::1",
+        [int]$IntervalMinutes = 3,
+        [int]$DelaySeconds = 30
+    )
+
+    if ($DryRun) {
+        Write-Host "  [DRY RUN] Would create task: $TaskName (ping -6 $Address every $IntervalMinutes min)" -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c ping -6 $Address -n 1 -w 2000 >nul 2>&1"
+        $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds($DelaySeconds) `
+            -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
+            -RepetitionDuration ([TimeSpan]::FromDays(3650))
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -RunLevel Highest -Force | Out-Null
+        Start-ScheduledTask -TaskName $TaskName
+        Write-Host "  [SET] Scheduled task created: $TaskName" -ForegroundColor Green
+    } catch {
+        Write-Host "  [WARN] Failed to create task: $TaskName" -ForegroundColor Yellow
+    }
+}
+
 # ============================================================
 # 7. WSL (Windows Subsystem for Linux)
 # ============================================================
@@ -1046,7 +1072,14 @@ if (-not $DryRun) {
 }
 
 # ============================================================
-# 24. Network Configuration (Reference Only)
+# 24. Network - IPv6 Keepalive Task
+# ============================================================
+Write-Step "Configuring IPv6 keepalive task"
+
+Ensure-IPv6KeepaliveTask
+
+# ============================================================
+# 25. Network Configuration (Reference Only)
 # ============================================================
 Write-Step "Network Configuration (Reference Only)"
 
@@ -1062,7 +1095,7 @@ Write-Host @"
 "@ -ForegroundColor DarkGray
 
 # ============================================================
-# 25. System PATH
+# 26. System PATH
 # ============================================================
 Write-Step "Verifying System PATH entries"
 
@@ -1108,7 +1141,7 @@ foreach ($p in $userPaths) {
 }
 
 # ============================================================
-# 26. Key Services Verification
+# 27. Key Services Verification
 # ============================================================
 Write-Step "Verifying key services"
 
@@ -1139,7 +1172,7 @@ foreach ($svc in $criticalServices) {
 }
 
 # ============================================================
-# 27. Restart Explorer to apply UI changes
+# 28. Restart Explorer to apply UI changes
 # ============================================================
 Write-Step "Applying UI changes"
 
