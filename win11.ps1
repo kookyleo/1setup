@@ -747,6 +747,124 @@ function Ensure-OpenSshServer {
     }
 }
 
+function Ensure-MinimalFirewallExposure {
+    if ($DryRun) {
+        Write-Host "  [DRY RUN] Would minimize inbound firewall exposure, keep SSH/RDP globally open, and dedupe admin rules" -ForegroundColor Yellow
+        return
+    }
+
+    $adminPorts = @("22", "3389")
+    $keepRegex = "OpenSSH|SSH Inbound TCP 22|Remote Desktop|远程桌面|核心网络|Core Networking"
+    $disableRegex = "Network Discovery|网络发现|File and Printer Sharing|文件和打印机共享|Remote Assistance|远程协助|PlayTo|播放到设备|Wi-?Fi Direct|无线显示|AllJoyn|mDNS|Teredo|Hyper-V"
+
+    $disabledCount = 0
+    $rules = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue
+    foreach ($rule in $rules) {
+        $meta = "$($rule.Name) $($rule.DisplayName) $($rule.DisplayGroup) $($rule.Group)"
+        if ($meta -match $keepRegex) { continue }
+        if ($meta -notmatch $disableRegex) { continue }
+        Disable-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue | Out-Null
+        $disabledCount++
+    }
+
+    # Keep SSH and RDP globally reachable (no source subnet restriction).
+    $sshAndRdpRules = Get-NetFirewallRule -Direction Inbound -Action Allow -ErrorAction SilentlyContinue |
+        Where-Object {
+            $meta = "$($_.Name) $($_.DisplayName) $($_.DisplayGroup) $($_.Group)"
+            $meta -match "OpenSSH|SSH Inbound TCP 22|Remote Desktop|远程桌面"
+        }
+    foreach ($r in $sshAndRdpRules) {
+        Enable-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue | Out-Null
+        Set-NetFirewallRule -Name $r.Name -Profile Any -ErrorAction SilentlyContinue | Out-Null
+        Set-NetFirewallAddressFilter -AssociatedNetFirewallRule $r -RemoteAddress "Any" -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    # Safety net: ensure at least one TCP allow rule exists for SSH(22) and RDP(3389).
+    $createdAdminRules = 0
+    $requiredAdminTcpRules = @(
+        @{ Name = "1setup-SSH-TCP-22"; DisplayName = "1setup SSH (TCP 22)"; Port = "22" },
+        @{ Name = "1setup-RDP-TCP-3389"; DisplayName = "1setup RDP (TCP 3389)"; Port = "3389" }
+    )
+    foreach ($req in $requiredAdminTcpRules) {
+        $exists = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
+            Get-NetFirewallPortFilter -ErrorAction SilentlyContinue |
+            Where-Object { "$($_.Protocol)".ToUpperInvariant() -eq "TCP" -and "$($_.LocalPort)" -eq $req.Port } |
+            Select-Object -First 1
+        if ($exists) { continue }
+
+        $namedRule = Get-NetFirewallRule -Name $req.Name -ErrorAction SilentlyContinue
+        if ($namedRule) {
+            Enable-NetFirewallRule -Name $req.Name -ErrorAction SilentlyContinue | Out-Null
+            Set-NetFirewallRule -Name $req.Name -Profile Any -ErrorAction SilentlyContinue | Out-Null
+            Set-NetFirewallAddressFilter -AssociatedNetFirewallRule $namedRule -RemoteAddress "Any" -ErrorAction SilentlyContinue | Out-Null
+        } else {
+            New-NetFirewallRule -Name $req.Name -DisplayName $req.DisplayName -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort $req.Port -Profile Any -RemoteAddress Any | Out-Null
+        }
+        $createdAdminRules++
+        Write-Host "  [SET] Created fallback admin rule: $($req.DisplayName)" -ForegroundColor Green
+    }
+
+    # Deduplicate active admin-port rules (22/3389) by protocol+port to avoid duplicate prompts/noise.
+    $dedupeRows = @()
+    $rowKeys = @{}
+    $adminRules = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue
+    foreach ($r in $adminRules) {
+        $portFilters = Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r -ErrorAction SilentlyContinue
+        foreach ($pf in @($portFilters)) {
+            $proto = "$($pf.Protocol)".ToUpperInvariant()
+            $rawPorts = "$($pf.LocalPort)".Trim().Trim("{}")
+            if (-not $rawPorts) { continue }
+            foreach ($part in ($rawPorts -split ",")) {
+                $port = $part.Trim()
+                if ($adminPorts -notcontains $port) { continue }
+                $itemKey = "$($r.Name)|$proto|$port"
+                if ($rowKeys.ContainsKey($itemKey)) { continue }
+                $rowKeys[$itemKey] = $true
+
+                $priority = 50
+                if ($r.Name -like "1setup-*") {
+                    $priority = 0
+                } elseif ($r.Name -eq "OpenSSH-Server-In-TCP" -or "$($r.DisplayGroup) $($r.DisplayName)" -match "OpenSSH|SSH Inbound TCP 22") {
+                    $priority = 1
+                } elseif ($r.Name -match "RemoteDesktop" -or "$($r.DisplayGroup) $($r.DisplayName)" -match "Remote Desktop|远程桌面") {
+                    $priority = 2
+                }
+
+                $dedupeRows += [PSCustomObject]@{
+                    RuleName = $r.Name
+                    RuleDisplayName = $r.DisplayName
+                    Key = "$proto-$port"
+                    Priority = $priority
+                }
+            }
+        }
+    }
+
+    $dupDisabledCount = 0
+    $groups = $dedupeRows | Group-Object -Property Key
+    foreach ($g in $groups) {
+        $ordered = $g.Group | Sort-Object Priority, RuleName
+        $first = $true
+        foreach ($entry in $ordered) {
+            if ($first) {
+                Enable-NetFirewallRule -Name $entry.RuleName -ErrorAction SilentlyContinue | Out-Null
+                Set-NetFirewallRule -Name $entry.RuleName -Profile Any -ErrorAction SilentlyContinue | Out-Null
+                $keepRule = Get-NetFirewallRule -Name $entry.RuleName -ErrorAction SilentlyContinue
+                if ($keepRule) {
+                    Set-NetFirewallAddressFilter -AssociatedNetFirewallRule $keepRule -RemoteAddress "Any" -ErrorAction SilentlyContinue | Out-Null
+                }
+                $first = $false
+                continue
+            }
+            Disable-NetFirewallRule -Name $entry.RuleName -ErrorAction SilentlyContinue | Out-Null
+            $dupDisabledCount++
+            Write-Host "  [SET] Disabled duplicate admin rule: $($entry.RuleDisplayName) [$($entry.Key)]" -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host "  [SET] Firewall minimized; disabled $disabledCount inbound allow rules, created $createdAdminRules fallback admin rules, disabled $dupDisabledCount duplicate admin rules" -ForegroundColor Green
+}
+
 # ============================================================
 # 7. WSL (Windows Subsystem for Linux)
 # ============================================================
@@ -927,7 +1045,14 @@ Write-Step "Configuring OpenSSH Server"
 Ensure-OpenSshServer
 
 # ============================================================
-# 12. User Settings - Theme & Personalization
+# 12. Minimize Firewall Exposure
+# ============================================================
+Write-Step "Minimizing firewall exposure"
+
+Ensure-MinimalFirewallExposure
+
+# ============================================================
+# 13. User Settings - Theme & Personalization
 # ============================================================
 Write-Step "Applying theme and personalization"
 
@@ -954,7 +1079,7 @@ Set-RegValue -Path $dwmKey -Name "ColorizationColorBalance" -Value 89
 Set-RandomSolidColorBackground
 
 # ============================================================
-# 13. User Settings - Desktop Icons
+# 14. User Settings - Desktop Icons
 # ============================================================
 Write-Step "Configuring desktop icons"
 
@@ -974,7 +1099,7 @@ Set-RegValue -Path $iconKey -Name "{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}" -Valu
 Set-RegValue -Path $iconKey -Name "{018D5C66-4533-4307-9B53-224DE2ED1FE6}" -Value 1
 
 # ============================================================
-# 14. User Settings - Taskbar
+# 15. User Settings - Taskbar
 # ============================================================
 Write-Step "Configuring taskbar"
 
@@ -1000,7 +1125,7 @@ $searchSettingsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSett
 Set-RegValue -Path $searchSettingsKey -Name "IsDynamicSearchBoxEnabled" -Value 0
 
 # ============================================================
-# 15. User Settings - Window Snapping
+# 16. User Settings - Window Snapping
 # ============================================================
 Write-Step "Configuring window snapping"
 
@@ -1009,7 +1134,7 @@ $snapKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
 Set-RegValue -Path $snapKey -Name "EnableSnapBar" -Value 0
 
 # ============================================================
-# 16. User Settings - Performance Options (Custom, font smoothing only)
+# 17. User Settings - Performance Options (Custom, font smoothing only)
 # ============================================================
 Write-Step "Configuring performance options"
 
@@ -1053,14 +1178,14 @@ Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Adv
 Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 0
 
 # ============================================================
-# 17. System - Virtual Memory
+# 18. System - Virtual Memory
 # ============================================================
 Write-Step "Disabling virtual memory (pagefile)"
 
 Disable-AllPageFiles
 
 # ============================================================
-# 18. User Settings - Start Menu
+# 19. User Settings - Start Menu
 # ============================================================
 Write-Step "Configuring Start Menu"
 
@@ -1069,7 +1194,7 @@ $startKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
 Set-RegValue -Path $startKey -Name "ShowFrequentList" -Value 0
 
 # ============================================================
-# 19. User Settings - File Explorer
+# 20. User Settings - File Explorer
 # ============================================================
 Write-Step "Configuring File Explorer"
 
@@ -1084,7 +1209,7 @@ Set-RegValue -Path $explorerKey -Name "ShowSuperHidden" -Value 0
 Set-RegValue -Path $explorerKey -Name "SeparateProcess" -Value 0
 
 # ============================================================
-# 20. User Settings - Input & Regional
+# 21. User Settings - Input & Regional
 # ============================================================
 Write-Step "Configuring regional and input settings"
 
@@ -1117,7 +1242,7 @@ Set-RegValue -Path $mouseKey -Name "SwapMouseButtons" -Value "0" -Type String
 Set-RegValue -Path $mouseKey -Name "MouseSensitivity" -Value "10" -Type String
 
 # ============================================================
-# 21. User Settings - Display
+# 22. User Settings - Display
 # ============================================================
 Write-Step "Configuring display"
 
@@ -1126,7 +1251,7 @@ Write-Host "  [INFO] Current DPI: 192 (200% scaling)" -ForegroundColor DarkGray
 Write-Host "  [INFO] Display scaling must be set manually via Settings > Display" -ForegroundColor DarkGray
 
 # ============================================================
-# 22. User Settings - Privacy & Misc
+# 23. User Settings - Privacy & Misc
 # ============================================================
 Write-Step "Configuring privacy settings"
 
@@ -1135,7 +1260,7 @@ $privacyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
 Set-RegValue -Path $privacyKey -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0
 
 # ============================================================
-# 23. Power Plan
+# 24. Power Plan
 # ============================================================
 Write-Step "Setting power plan"
 
@@ -1148,7 +1273,7 @@ if (-not $DryRun) {
 }
 
 # ============================================================
-# 24. Network - Prefer IPv4 over IPv6
+# 25. Network - Prefer IPv4 over IPv6
 # ============================================================
 Write-Step "Setting IPv4 priority over IPv6"
 
@@ -1160,14 +1285,14 @@ if (-not $DryRun) {
 }
 
 # ============================================================
-# 25. Network - IPv6 Keepalive Task
+# 26. Network - IPv6 Keepalive Task
 # ============================================================
 Write-Step "Configuring IPv6 keepalive task"
 
 Ensure-IPv6KeepaliveTask
 
 # ============================================================
-# 26. Network Configuration (Reference Only)
+# 27. Network Configuration (Reference Only)
 # ============================================================
 Write-Step "Network Configuration (Reference Only)"
 
@@ -1183,7 +1308,7 @@ Write-Host @"
 "@ -ForegroundColor DarkGray
 
 # ============================================================
-# 27. System PATH
+# 28. System PATH
 # ============================================================
 Write-Step "Verifying System PATH entries"
 
@@ -1229,7 +1354,7 @@ foreach ($p in $userPaths) {
 }
 
 # ============================================================
-# 28. Key Services Verification
+# 29. Key Services Verification
 # ============================================================
 Write-Step "Verifying key services"
 
@@ -1260,7 +1385,7 @@ foreach ($svc in $criticalServices) {
 }
 
 # ============================================================
-# 29. Restart Explorer to apply UI changes
+# 30. Restart Explorer to apply UI changes
 # ============================================================
 Write-Step "Applying UI changes"
 
