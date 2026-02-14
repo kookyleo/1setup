@@ -666,6 +666,47 @@ function Ensure-IPv6KeepaliveTask {
     }
 }
 
+function Ensure-OpenSshServer {
+    if ($DryRun) {
+        Write-Host "  [DRY RUN] Would install/configure OpenSSH Server (sshd)" -ForegroundColor Yellow
+        return
+    }
+
+    $capName = "OpenSSH.Server~~~~0.0.1.0"
+    $cap = Get-WindowsCapability -Online -Name $capName -ErrorAction SilentlyContinue
+    if ($cap -and $cap.State -eq "Installed") {
+        Write-Host "  OpenSSH Server capability already installed" -ForegroundColor DarkGray
+    } else {
+        try {
+            Add-WindowsCapability -Online -Name $capName -ErrorAction Stop | Out-Null
+            Write-Host "  [SET] OpenSSH Server capability installed" -ForegroundColor Green
+        } catch {
+            Write-Host "  [WARN] OpenSSH Server capability install failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    $sshd = Get-Service -Name "sshd" -ErrorAction SilentlyContinue
+    if ($sshd) {
+        Set-Service -Name "sshd" -StartupType Automatic -ErrorAction SilentlyContinue
+        if ($sshd.Status -ne "Running") {
+            Start-Service -Name "sshd" -ErrorAction SilentlyContinue
+        }
+        Write-Host "  [SET] sshd service set to Automatic and Running" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] sshd service not found" -ForegroundColor Yellow
+    }
+
+    $ruleName = "OpenSSH-Server-In-TCP"
+    $fwRule = Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue
+    if (-not $fwRule) {
+        New-NetFirewallRule -Name $ruleName -DisplayName "OpenSSH Server (sshd)" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+        Write-Host "  [SET] Firewall rule created: $ruleName" -ForegroundColor Green
+    } else {
+        Enable-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  [SET] Firewall rule enabled: $ruleName" -ForegroundColor Green
+    }
+}
+
 # ============================================================
 # 7. WSL (Windows Subsystem for Linux)
 # ============================================================
@@ -839,7 +880,14 @@ if ($DryRun) {
 }
 
 # ============================================================
-# 11. User Settings - Theme & Personalization
+# 11. Configure OpenSSH Server
+# ============================================================
+Write-Step "Configuring OpenSSH Server"
+
+Ensure-OpenSshServer
+
+# ============================================================
+# 12. User Settings - Theme & Personalization
 # ============================================================
 Write-Step "Applying theme and personalization"
 
@@ -866,7 +914,7 @@ Set-RegValue -Path $dwmKey -Name "ColorizationColorBalance" -Value 89
 Set-RandomSolidColorBackground
 
 # ============================================================
-# 12. User Settings - Desktop Icons
+# 13. User Settings - Desktop Icons
 # ============================================================
 Write-Step "Configuring desktop icons"
 
@@ -886,7 +934,7 @@ Set-RegValue -Path $iconKey -Name "{5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0}" -Valu
 Set-RegValue -Path $iconKey -Name "{018D5C66-4533-4307-9B53-224DE2ED1FE6}" -Value 1
 
 # ============================================================
-# 13. User Settings - Taskbar
+# 14. User Settings - Taskbar
 # ============================================================
 Write-Step "Configuring taskbar"
 
@@ -912,7 +960,7 @@ $searchSettingsKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSett
 Set-RegValue -Path $searchSettingsKey -Name "IsDynamicSearchBoxEnabled" -Value 0
 
 # ============================================================
-# 14. User Settings - Window Snapping
+# 15. User Settings - Window Snapping
 # ============================================================
 Write-Step "Configuring window snapping"
 
@@ -921,7 +969,7 @@ $snapKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
 Set-RegValue -Path $snapKey -Name "EnableSnapBar" -Value 0
 
 # ============================================================
-# 15. User Settings - Performance Options (Custom, font smoothing only)
+# 16. User Settings - Performance Options (Custom, font smoothing only)
 # ============================================================
 Write-Step "Configuring performance options"
 
@@ -965,14 +1013,14 @@ Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Adv
 Set-RegValue -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ListviewShadow" -Value 0
 
 # ============================================================
-# 16. System - Virtual Memory
+# 17. System - Virtual Memory
 # ============================================================
 Write-Step "Disabling virtual memory (pagefile)"
 
 Disable-AllPageFiles
 
 # ============================================================
-# 17. User Settings - Start Menu
+# 18. User Settings - Start Menu
 # ============================================================
 Write-Step "Configuring Start Menu"
 
@@ -981,7 +1029,7 @@ $startKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Start"
 Set-RegValue -Path $startKey -Name "ShowFrequentList" -Value 0
 
 # ============================================================
-# 18. User Settings - File Explorer
+# 19. User Settings - File Explorer
 # ============================================================
 Write-Step "Configuring File Explorer"
 
@@ -996,7 +1044,7 @@ Set-RegValue -Path $explorerKey -Name "ShowSuperHidden" -Value 0
 Set-RegValue -Path $explorerKey -Name "SeparateProcess" -Value 0
 
 # ============================================================
-# 19. User Settings - Input & Regional
+# 20. User Settings - Input & Regional
 # ============================================================
 Write-Step "Configuring regional and input settings"
 
@@ -1029,7 +1077,7 @@ Set-RegValue -Path $mouseKey -Name "SwapMouseButtons" -Value "0" -Type String
 Set-RegValue -Path $mouseKey -Name "MouseSensitivity" -Value "10" -Type String
 
 # ============================================================
-# 20. User Settings - Display
+# 21. User Settings - Display
 # ============================================================
 Write-Step "Configuring display"
 
@@ -1038,7 +1086,7 @@ Write-Host "  [INFO] Current DPI: 192 (200% scaling)" -ForegroundColor DarkGray
 Write-Host "  [INFO] Display scaling must be set manually via Settings > Display" -ForegroundColor DarkGray
 
 # ============================================================
-# 21. User Settings - Privacy & Misc
+# 22. User Settings - Privacy & Misc
 # ============================================================
 Write-Step "Configuring privacy settings"
 
@@ -1047,7 +1095,7 @@ $privacyKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
 Set-RegValue -Path $privacyKey -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0
 
 # ============================================================
-# 22. Power Plan
+# 23. Power Plan
 # ============================================================
 Write-Step "Setting power plan"
 
@@ -1060,7 +1108,7 @@ if (-not $DryRun) {
 }
 
 # ============================================================
-# 23. Network - Prefer IPv4 over IPv6
+# 24. Network - Prefer IPv4 over IPv6
 # ============================================================
 Write-Step "Setting IPv4 priority over IPv6"
 
@@ -1072,14 +1120,14 @@ if (-not $DryRun) {
 }
 
 # ============================================================
-# 24. Network - IPv6 Keepalive Task
+# 25. Network - IPv6 Keepalive Task
 # ============================================================
 Write-Step "Configuring IPv6 keepalive task"
 
 Ensure-IPv6KeepaliveTask
 
 # ============================================================
-# 25. Network Configuration (Reference Only)
+# 26. Network Configuration (Reference Only)
 # ============================================================
 Write-Step "Network Configuration (Reference Only)"
 
@@ -1095,7 +1143,7 @@ Write-Host @"
 "@ -ForegroundColor DarkGray
 
 # ============================================================
-# 26. System PATH
+# 27. System PATH
 # ============================================================
 Write-Step "Verifying System PATH entries"
 
@@ -1141,7 +1189,7 @@ foreach ($p in $userPaths) {
 }
 
 # ============================================================
-# 27. Key Services Verification
+# 28. Key Services Verification
 # ============================================================
 Write-Step "Verifying key services"
 
@@ -1172,7 +1220,7 @@ foreach ($svc in $criticalServices) {
 }
 
 # ============================================================
-# 28. Restart Explorer to apply UI changes
+# 29. Restart Explorer to apply UI changes
 # ============================================================
 Write-Step "Applying UI changes"
 
