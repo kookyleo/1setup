@@ -701,11 +701,29 @@ function Ensure-OpenSshServer {
     $defaultShell = $null
     $pwshCmd = Get-Command "pwsh.exe" -ErrorAction SilentlyContinue
     if ($pwshCmd -and (Test-Path $pwshCmd.Source)) {
-        $defaultShell = $pwshCmd.Source
-    } else {
+        $pwshVersion = $null
+        try {
+            $verText = (& $pwshCmd.Source -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null | Select-Object -First 1)
+            if ($verText) {
+                $pwshVersion = [version]$verText.Trim()
+            }
+        } catch { }
+
+        if ($pwshVersion -and $pwshVersion.Major -ge 7) {
+            $defaultShell = $pwshCmd.Source
+            Write-Host "  pwsh detected: $pwshVersion ($defaultShell)" -ForegroundColor DarkGray
+        } elseif ($pwshVersion) {
+            Write-Host "  [WARN] pwsh version $pwshVersion is below 7; fallback to Windows PowerShell" -ForegroundColor Yellow
+        } else {
+            Write-Host "  [WARN] Unable to detect pwsh version; fallback to Windows PowerShell" -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $defaultShell) {
         $ps51 = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
         if (Test-Path $ps51) {
             $defaultShell = $ps51
+            Write-Host "  Windows PowerShell selected: $defaultShell" -ForegroundColor DarkGray
         }
     }
     if ($defaultShell) {
