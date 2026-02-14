@@ -672,14 +672,16 @@ function Ensure-OpenSshServer {
         return
     }
 
-    $capName = "OpenSSH.Server~~~~0.0.1.0"
-    $cap = Get-WindowsCapability -Online -Name $capName -ErrorAction SilentlyContinue
-    if ($cap -and $cap.State -eq "Installed") {
-        Write-Host "  OpenSSH Server capability already installed" -ForegroundColor DarkGray
+    $cap = Get-WindowsCapability -Online -Name "OpenSSH.Server*" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $cap) {
+        Write-Host "  [WARN] OpenSSH Server capability not found on this system" -ForegroundColor Yellow
+    } elseif ($cap.State -eq "Installed") {
+        Write-Host "  OpenSSH Server capability already installed: $($cap.Name)" -ForegroundColor DarkGray
     } else {
         try {
-            Add-WindowsCapability -Online -Name $capName -ErrorAction Stop | Out-Null
-            Write-Host "  [SET] OpenSSH Server capability installed" -ForegroundColor Green
+            Add-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+            Write-Host "  [SET] OpenSSH Server capability installed: $($cap.Name)" -ForegroundColor Green
         } catch {
             Write-Host "  [WARN] OpenSSH Server capability install failed: $($_.Exception.Message)" -ForegroundColor Yellow
         }
@@ -694,6 +696,26 @@ function Ensure-OpenSshServer {
         Write-Host "  [SET] sshd service set to Automatic and Running" -ForegroundColor Green
     } else {
         Write-Host "  [WARN] sshd service not found" -ForegroundColor Yellow
+    }
+
+    $defaultShell = $null
+    $pwshCmd = Get-Command "pwsh.exe" -ErrorAction SilentlyContinue
+    if ($pwshCmd -and (Test-Path $pwshCmd.Source)) {
+        $defaultShell = $pwshCmd.Source
+    } else {
+        $ps51 = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+        if (Test-Path $ps51) {
+            $defaultShell = $ps51
+        }
+    }
+    if ($defaultShell) {
+        $sshReg = "HKLM:\SOFTWARE\OpenSSH"
+        Set-RegValue -Path $sshReg -Name "DefaultShell" -Value $defaultShell -Type String
+        Set-RegValue -Path $sshReg -Name "DefaultShellCommandOption" -Value "-NoLogo -NoProfile" -Type String
+        Restart-Service -Name "sshd" -ErrorAction SilentlyContinue
+        Write-Host "  [SET] OpenSSH default shell: $defaultShell" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] No PowerShell executable found for OpenSSH default shell" -ForegroundColor Yellow
     }
 
     $ruleName = "OpenSSH-Server-In-TCP"
